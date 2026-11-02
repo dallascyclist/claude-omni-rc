@@ -29,7 +29,7 @@ coverage threshold, no e2e. Everything else is caught by a human or not at all.
 | `src/daemon.ts` | wiring: builds every component and starts/stops them, in a deliberate order |
 | `src/config.ts` | `loadConfig(env)` — the **only** place `process.env` is read |
 | `src/bus.ts`, `src/types.ts` | the synchronous event bus and the `BusEvent` contract both session kinds emit |
-| `src/sessions/` | `manager` (registry + armed switch), `tmux-watcher` (discovery), `transcript-watcher` (tailing), `sdk-driver` (headless turns), `tmux-inject` (pane I/O), `transcript` (JSONL parsing) |
+| `src/sessions/` | `manager` (registry + armed switch), `tmux-watcher` (discovery), `transcript-watcher` (tailing), `sdk-driver` (headless turns), `tmux-inject` / `zellij-inject` (pane I/O, picked by `MULTIPLEXER`), `transcript` (JSONL parsing) |
 | `src/permissions.ts`, `src/dialogs.ts` | approval and blocking-dialog flows, with their timeouts |
 | `src/state.ts` | `state.json`, written atomically; a corrupt file is preserved, never overwritten |
 | `bot/render.ts` | pure presentation: markdown→HTML, tag splitting, tool-call descriptions, agent card |

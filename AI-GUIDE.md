@@ -21,7 +21,7 @@ cd claude-omni-rc
 ./install.sh
 ```
 
-The installer is interactive: it checks prerequisites (Node 22, Ollama, tmux),
+The installer is interactive: it checks prerequisites (Node 22, Ollama, tmux or zellij),
 runs `npm install`, guides the human through the bot token and authorization
 into `.env`, optionally pulls the Ollama models, registers the launchd daemon,
 and adds the Claude Code hooks (`SessionStart` auto-attach + `PermissionRequest`
@@ -49,6 +49,7 @@ npm install
 | create a headless session | from Telegram: `/new <prompt>` (standard by default: approve/reject buttons; `/new --auto <prompt>` for automode; `/new --model <name> <prompt>` to pick the model) |
 | use a provider other than Ollama for headless sessions | set `ANTHROPIC_BASE_URL` (+ `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`) in `.env`; a `claude-*` model (or `opus`/`sonnet`/`haiku`/`fable`) means Anthropic even with `ANTHROPIC_BASE_URL` unset; anything else → Ollama (`OLLAMA_BASE_URL`) |
 | continue an ongoing session from the phone | make sure it runs inside tmux — start it with `omni-rc <name>` (or `tmux new -s claude:<project>`); it auto-appears in `/sessions` and streams as a chat |
+| use zellij instead of tmux | set `MULTIPLEXER=zellij` in `.env` and restart the daemon (needs zellij 0.44+); `omni-rc <name>` then starts a `claude:<name>` zellij session, or start one with `zellij -s claude:<project>` and run `claude` in it. One multiplexer at a time: sessions in the other are mirrored read-only |
 | start a session ready for remote control | `omni-rc <name>` (shell function added by `./install.sh`); options in `omni-rc --help` |
 | pick the provider for an `omni-rc` session | no `-m` → Ollama (`DEFAULT_MODEL` from `.env`); `-m claude-*`/`opus`/`sonnet`/`haiku`/`fable` → Anthropic; `ANTHROPIC_BASE_URL` in `.env` overrides both |
 | started claude without tmux and want remote control | you can't move a running process into tmux — restart it with `omni-rc <name>`; the `SessionStart` hook warns you when a session starts outside tmux |
@@ -56,7 +57,7 @@ npm install
 | see a subagent's work in a headless session | a `🤖 Agent` card appears per subagent with its progress; `👁 Details` / `🙈 Hide` expand/collapse its tool calls (headless only — a subagent in a terminal session shows just the `🤖 Agent` line) |
 | answer a multiple-choice question | the question arrives as a `❓` message with one button per option; tap it (or reply with the option number/text) |
 | auto-attach every session on start | `./install.sh` already adds the `SessionStart` + `PermissionRequest` hooks (see `~/.claude/settings.json`) |
-| attach a terminal (tmux) session | from Telegram: `/attach <project>` (session must be named `claude:<project>`) |
+| attach a terminal (tmux/zellij) session | from Telegram: `/attach <project>` (session must be named `claude:<project>`) |
 | stop a session / a running turn | from Telegram: `/stop` |
 | approve / reject a permission | tap `✓ Approve` / `✗ Reject` on the bot message (timeout → deny) |
 | see the active session's raw screen | from Telegram: `/view` |
@@ -77,16 +78,16 @@ npm install
   `/start`**; no streaming, no injection, no relay.
 - `/sessions` — list sessions and switch the active one (inline buttons). Only
   the active session's screen is streamed.
-- `/view` — send the active session's current screen (tmux pane).
+- `/view` — send the active session's current screen (tmux/zellij pane).
 - `/new [--auto|--standard] [--model <name>] [--effort <level>] <text>` — create a headless
   session and send it the prompt (standard by default: approve/reject buttons;
   `--auto` for automode; `--model` to pick the model for this session;
   `--effort` to set the reasoning effort). Headless
   sessions use the provider configured in `.env` (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`),
   falling back to Ollama when unset.
-- `/attach <project>` — attach the `claude:<project>` tmux session.
-- `/stop` — abort the active session's running turn (sends `Ctrl+C` to a tmux
-  pane, like pressing ESC).
+- `/attach <project>` — attach the `claude:<project>` tmux (or zellij) session.
+- `/stop` — abort the active session's running turn (sends `Ctrl+C` to the
+  terminal pane, like pressing ESC).
 - `/status` — active session status.
 - `/history [id]` — show the last messages of a session.
 - `/delete [id]` — delete a session (with an inline confirm).
@@ -97,8 +98,8 @@ npm install
   used figure comes from the last assistant turn's usage in the session
   transcript, the max from the Ollama model context or a known Anthropic window.
 - `/compact` — compact the active session's history (runs the CLI's `/compact`:
-  headless sessions get it as a prompt, terminal ones pasted into the tmux
-  pane). The session must be idle to compact.
+  headless sessions get it as a prompt, terminal ones pasted into the
+  terminal pane). The session must be idle to compact.
 - `/diag` — daemon state, sessions, pending interactions and recent errors;
   per session it shows the model, the reasoning effort and the git branch when
   available (from the structured log at `~/.claude-omni-rc/logs/daemon.jsonl`).
@@ -114,7 +115,8 @@ interactive prompts). Slash commands the bot doesn't own are **not** forwarded:
 they get an "Unknown command" reply (some CLI commands like `/context` are
 interactive UIs that would leave the session stuck waiting for input).
 Selecting a session in `/sessions` also shows its last messages.
-Terminal sessions must run inside tmux (`claude:<project>`) to receive text.
+Terminal sessions must run inside tmux (`claude:<project>`) to receive text —
+or inside zellij with `MULTIPLEXER=zellij`.
 
 ### Headless sessions
 

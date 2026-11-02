@@ -90,12 +90,18 @@ export function startApi(port: number, deps: ApiDeps): ApiHandle {
       req.on('data', c => { body += c; });
       req.on('end', () => {
         try {
-          const input = JSON.parse(body) as { projectDir?: string; tmuxTarget?: string; title?: string };
+          const input = JSON.parse(body) as { projectDir?: string; tmuxTarget?: string; multiplexer?: string; title?: string };
           if (!input.projectDir) throw new Error('projectDir is required');
+          // A target from the multiplexer the daemon doesn't drive is useless
+          // (it can't inject or capture there) and harmful: the watcher would
+          // never see it alive and would prune a session that is still being
+          // mirrored. Hooks older than zellij support send no `multiplexer`:
+          // their target is a tmux one.
+          const target = (input.multiplexer ?? 'tmux') === deps.config.multiplexer ? input.tmuxTarget : undefined;
           const session = deps.manager.registerTerminal({
             title: input.title ?? basename(input.projectDir),
             projectDir: input.projectDir,
-            ...(input.tmuxTarget ? { tmuxTarget: input.tmuxTarget } : {}),
+            ...(target ? { tmuxTarget: target } : {}),
           });
           deps.manager.persist();
           res.writeHead(200, { 'content-type': 'application/json' });

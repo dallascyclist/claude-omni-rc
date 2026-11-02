@@ -58,7 +58,7 @@ state dir. Your `.env` is kept.
 |---|---|
 | **Node.js 22+** | runtime (required) |
 | **Ollama**, running | the default provider — not needed if you point `ANTHROPIC_BASE_URL` at another one |
-| **tmux** | required for terminal sessions: 1:1 input injection and `/view` |
+| **tmux** (or **zellij** 0.44+) | required for terminal sessions: 1:1 input injection and `/view` — see [Using zellij](#using-zellij-instead-of-tmux) |
 
 ### Manual install
 
@@ -94,7 +94,7 @@ For a foreground test instead: `npm run dev`. Logs go to
 
 `stop.sh` removes the SessionStart/PermissionRequest hooks from
 `~/.claude/settings.json`, so sessions stop auto-attaching until you run
-`start.sh` again. Your own tmux sessions are never touched.
+`start.sh` again. Your own tmux/zellij sessions are never touched.
 
 </details>
 
@@ -118,6 +118,25 @@ It picks the provider the same way headless sessions do: `DEFAULT_MODEL` from
 over both. `omni-rc --help` lists every option; an existing session is just
 reattached.
 
+### Using zellij instead of tmux
+
+Set `MULTIPLEXER=zellij` in `.env` and restart the daemon (the installer does
+it for you when zellij is installed and tmux isn't). Everything else stays the
+same: sessions are still named `claude:<project>`, `omni-rc` starts them in
+zellij, and input, `/view`, `/stop` and question answers go through
+`zellij action`. Needs zellij 0.44+ (developed and tested on 0.46).
+
+```bash
+omni-rc my-project                          # zellij session claude:my-project + claude
+zellij -s claude:my-project                 # or start one by hand, then run claude in it
+```
+
+The daemon drives one multiplexer at a time. A session running in the other one
+is still mirrored to Telegram through the `SessionStart` hook, read-only. In a
+zellij session with several panes, the pane running `claude` is the one that
+receives input. When claude exits in a session started by `omni-rc`, the
+session closes like a tmux one does.
+
 | Command | What it does |
 |---------|--------------|
 | `/start <code>` | pair this Telegram account (first time) |
@@ -125,8 +144,8 @@ reattached.
 | `/sessions` | list sessions, switch the active one |
 | `/view` | show the active session's current screen |
 | `/new [--auto\|--standard] [--model <name>] [--effort <level>] <text>` | headless session + your prompt (standard by default: approve/reject buttons) |
-| `/attach <project>` | attach a `claude:<project>` tmux session |
-| `/stop` | abort the running turn (Ctrl+C for a tmux pane) |
+| `/attach <project>` | attach a `claude:<project>` tmux (or zellij) session |
+| `/stop` | abort the running turn (Ctrl+C for a terminal pane) |
 | `/status` | the active session's status |
 | `/history [id]` | last messages of a session |
 | `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |
@@ -149,7 +168,7 @@ terminal.
 ### How sessions get attached
 
 Only **your sessions** are tracked — nothing scans `~/.claude/projects` on its
-own. A session appears via `claude:*` tmux discovery, the `SessionStart` hook,
+own. A session appears via `claude:*` tmux/zellij discovery, the `SessionStart` hook,
 or `/attach`, whatever model backs it.
 
 - **Chat, not screen** — the daemon tails the conversation the CLI writes and
@@ -173,12 +192,13 @@ or `/attach`, whatever model backs it.
   A model refusal offers 🔄 Retry / Skip. Any other blocking dialog the CLI asks
   for is shown with a Cancel button rather than ignored, so a session never
   parks waiting for input you can't give. **Terminal sessions work the same
-  way**: the plan approval is a full-screen interactive UI inside the tmux
+  way**: the plan approval is a full-screen interactive UI inside the terminal
   pane, but the ✓ Approve / ✗ Reject / ✏️ Edit buttons resolve it from
   Telegram — the decision is sent back to the CLI with the plan as
   `updatedInput`, which is what the CLI needs to exit plan mode.
 - **Interact 1:1** — your message is pasted into the pane and submitted. Needs
-  tmux; a session outside tmux streams as chat but is read-only.
+  tmux (or zellij, see `MULTIPLEXER`); a session outside it streams as chat but
+  is read-only.
 - **Headless sessions** (`/new`) run in the first `WORKSPACE_DIRS` entry, which
   must be set — `/new` refuses to start rather than falling back to your home
   directory. They ask before **every** tool call by default; `--auto` runs them
@@ -216,7 +236,7 @@ blocked or auto-denied.
 `./install.sh` adds both to `~/.claude/settings.json` (idempotently):
 
 - **`SessionStart`** — registers every session with the daemon the moment it
-  starts, recording the tmux session as the injection target. A session started
+  starts, recording the tmux or zellij session as the injection target. A session started
   without the `claude:` naming convention is still continuable from Telegram.
 - **`PermissionRequest`** — delegates CLI permission decisions to Telegram.
 
@@ -310,7 +330,8 @@ and one authorization method — plus `WORKSPACE_DIRS` if you want `/new`.
 | `API_PORT` | `4123` | loopback port for the local API (both hooks) |
 | `ARMED_ON_START` | `false` | arm the remote control on daemon start |
 | `IDLE_GRACE_MS` | `3000` | how long a session must be quiet to count as idle |
-| `POLL_INTERVAL_MS` | `500` | tmux discovery polling interval |
+| `MULTIPLEXER` | `tmux` | `tmux` or `zellij`: where `claude:<project>` sessions run (discovery, input, `/view`, `/stop`) |
+| `POLL_INTERVAL_MS` | `500` | tmux/zellij discovery polling interval |
 | `CWD_REFRESH_MS` | `10000` | how often to re-check a session's real cwd (costs a `ps` + `lsof`) |
 | `CLAUDE_OMNI_RC_NO_UPDATE_CHECK` | unset | set to disable the GitHub release check below |
 | `LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug` for the structured log |
@@ -351,8 +372,9 @@ Disable it with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1` in `.env`.
 | *"/new refuses to start"* | `WORKSPACE_DIRS` is unset. There is no fallback to `$HOME` on purpose. |
 | The daemon seems dead | Check `~/.claude-omni-rc/logs/daemon.{log,err.log}`, then `npm run dev` to see errors live. |
 | A session is stuck on *running* | `/stop` aborts the turn via `AbortController`. |
-| Text *"can't be injected"* | That session isn't in tmux. Restart it with `omni-rc <name>`. |
-| A session doesn't show up | Sessions come from `claude:*` tmux discovery, the SessionStart hook or `/attach`. Check the hook is in `~/.claude/settings.json`, the daemon is up, and `API_PORT` is free. |
+| Text *"can't be injected"* | That session isn't in the multiplexer the daemon drives (`MULTIPLEXER`). Restart it with `omni-rc <name>`. |
+| A session doesn't show up | Sessions come from `claude:*` tmux/zellij discovery, the SessionStart hook or `/attach`. Check the hook is in `~/.claude/settings.json`, the daemon is up, and `API_PORT` is free. |
+| zellij sessions don't show up (`MULTIPLEXER=zellij`) | zellij finds its sessions through `$TMPDIR`: if the daemon runs with a different `TMPDIR` than your shell, it sees none. Compare `zellij list-sessions` from the shell with `npm run dev`. |
 | The session streams nothing | Only the **active** session streams — select it with `/sessions`. If it has no transcript, use `/view`. Check `PROJECTS_DIR` matches where the CLI writes. |
 | Permission prompts hang in the terminal | The daemon is armed but has no chat bound. Send any message to the bot; the chat is then remembered across restarts. |
 | A terminal session shows a plan I can't approve from the phone | The plan approval is a full-screen terminal UI, but the ✓ Approve / ✗ Reject / ✏️ Edit buttons resolve it from Telegram (the decision is sent back with the plan as `updatedInput`). If the buttons don't appear, check the daemon is armed and a chat is bound. |
@@ -385,18 +407,19 @@ src/
     ├── sdk-driver.ts    headless sessions (Agent SDK query + resume)
     ├── tmux-watcher.ts  discover `claude:*` sessions, prune dead ones
     ├── tmux-inject.ts   pane cwd, capture-pane, paste-and-Enter input
+    ├── zellij-inject.ts the same for zellij (MULTIPLEXER=zellij)
     ├── transcript.ts    read the CLI transcripts
     └── transcript-watcher.ts  tail transcripts → chat events + status
 bot/telegram.ts          grammy bot: commands, keyboards, chat streaming
 ```
 
-Data flow: `Telegram ↔ bot ↔ bus ↔ sessions (SDK / tmux) ↔ provider`.
+Data flow: `Telegram ↔ bot ↔ bus ↔ sessions (SDK / tmux or zellij) ↔ provider`.
 
 - **Headless sessions** are owned by the daemon and driven via the Claude Agent
   SDK (`query` + `resume`, `canUseTool`), version **0.3.221** (pinned — the SDK
   is in preview and changes fast). Session ids are persisted, so they survive
   daemon restarts.
-- **Terminal sessions** are discovered from tmux and streamed by tailing the
+- **Terminal sessions** are discovered from tmux (or zellij) and streamed by tailing the
   transcript the CLI writes; input is driven 1:1 by pasting into the pane.
   Streaming runs only while armed, and follows the session selected in
   `/sessions`.

@@ -116,11 +116,24 @@ check_node() {
 }
 
 check_optional_tools() {
-  if ! have tmux; then
-    warn "tmux is not installed. Terminal sessions (mirror + /attach) will be unavailable."
-    hint "  Install it with:  brew install tmux   (or:  apt install tmux)"
-  else
+  if have tmux; then
     ok "tmux found."
+  elif have zellij; then
+    ok "zellij found (no tmux) — terminal sessions will run in zellij."
+  else
+    warn "Neither tmux nor zellij is installed. Terminal sessions (mirror + /attach) will be unavailable."
+    hint "  Install one with:  brew install tmux   (or:  apt install tmux, or zellij 0.44+)"
+  fi
+}
+
+# MULTIPLEXER defaults to tmux. When only zellij is installed, a blank value
+# would leave terminal sessions uncontrollable, so fill it in — but never over a
+# value the user already chose.
+prepare_multiplexer() {
+  [ -n "$(get_env MULTIPLEXER)" ] && return
+  if ! have tmux && have zellij; then
+    set_env MULTIPLEXER zellij
+    ok "MULTIPLEXER=zellij saved to .env (tmux is not installed)."
   fi
 }
 
@@ -287,7 +300,7 @@ install_hook() {
 }
 
 # The `omni-rc` shell function: starts a Claude Code session inside a
-# `claude:<name>` tmux session, ready for remote control. Added to the user's
+# `claude:<name>` tmux (or zellij) session, ready for remote control. Added to the user's
 # shell rc so it's available as a plain command. Idempotent; removed by
 # --uninstall.
 shell_rc_file() {
@@ -310,7 +323,7 @@ install_omni_rc_function() {
   cat >> "$rc" <<EOF
 
 $marker_start
-# omni-rc <name> — start Claude Code inside a claude:<name> tmux session
+# omni-rc <name> — start Claude Code inside a claude:<name> tmux/zellij session
 omni-rc() { "$REPO_DIR/scripts/omni-rc.sh" "\$@"; }
 $marker_end
 EOF
@@ -424,6 +437,7 @@ main() {
   check_ollama
   install_deps
   prepare_env
+  prepare_multiplexer
   prepare_workspace
   local default_model
   default_model="$(get_env DEFAULT_MODEL)"; [ -n "$default_model" ] || default_model="$DEFAULT_MODEL_FALLBACK"

@@ -33,6 +33,13 @@ describe('loadConfig', () => {
     expect(c.armedOnStart).toBe(true);
     expect(c.workspaceDirs).toEqual([`${process.env.HOME}/proj1`, '/tmp/proj2']);
   });
+  it('drives tmux unless zellij is asked for explicitly', () => {
+    expect(loadConfig({}).multiplexer).toBe('tmux'); // existing installs keep working unchanged
+    expect(loadConfig({ MULTIPLEXER: '' }).multiplexer).toBe('tmux'); // blank in .env means default
+    expect(loadConfig({ MULTIPLEXER: 'zellij' }).multiplexer).toBe('zellij');
+    expect(loadConfig({ MULTIPLEXER: ' Zellij ' }).multiplexer).toBe('zellij');
+    expect(loadConfig({ MULTIPLEXER: 'screen' }).multiplexer).toBe('tmux');
+  });
   it('accepts an explicit automode default', () => {
     expect(loadConfig({ DEFAULT_PERMISSION_MODE: 'auto' }).defaultPermissionMode).toBe('auto');
   });

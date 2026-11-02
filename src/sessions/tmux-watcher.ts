@@ -1,13 +1,14 @@
 import type { Config } from '../config.js';
 import type { EffortLevel } from '../types.js';
 import type { SessionManager } from './manager.js';
-import type { TmuxClient, ProcessTree } from './tmux-inject.js';
+import type { Multiplexer } from './tmux-inject.js';
 
 export interface WatcherDeps {
   config: Config;
   manager: SessionManager;
-  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand' | 'claudeCwd' | 'claudeModel' | 'claudeEffort'>
-    & Partial<Pick<TmuxClient, 'processTree'>>;
+  // tmux or zellij (MULTIPLEXER); the name predates zellij support.
+  tmux: Pick<Multiplexer, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand' | 'claudeCwd' | 'claudeModel' | 'claudeEffort'>
+    & Partial<Pick<Multiplexer, 'processTree'>>;
 }
 
 // Grace prima di rimuovere una sessione terminale il cui target tmux è sparito:
@@ -24,6 +25,12 @@ const CLAUDE_EXIT_GRACE_MS = 120_000;
 // uscito e il prompt è tornato). Qualsiasi altro comando nel pane — incluso
 // "ollama" (lanciato con `ollama launch claude`) — significa sessione attiva.
 const SHELL_NAMES = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'ash', 'nu', 'pwsh']);
+
+// Claude Code is not running in the session: the pane is back at a shell, or
+// (zellij) the session has no live terminal pane left — paneCommand undefined.
+export function claudeGone(cmd: string | undefined): boolean {
+  return cmd === undefined || SHELL_NAMES.has(cmd);
+}
 
 // Scoperta sessioni terminale: `tmux list-sessions` → sessioni `claude:<progetto>`,
 // registrate col cwd reale del pane (serve a risolvere il transcript). Solo
@@ -78,7 +85,7 @@ export class TmuxWatcher {
       // un pane tornato alla shell non ha claude in esecuzione: niente da
       // tracciare (checkExited la rinnoverebbe all'infinito altrimenti).
       try {
-        if (SHELL_NAMES.has(await this.deps.tmux.paneCommand(target))) continue;
+        if (claudeGone(await this.deps.tmux.paneCommand(target))) continue;
       } catch { /* pane illeggibile → registra comunque (fallback) */ }
       let projectDir = `~/${name}`;
       try {
@@ -161,9 +168,9 @@ export class TmuxWatcher {
     for (const s of this.deps.manager.list()) {
       if (s.kind !== 'terminal' || !s.tmuxTarget) continue;
       if (!alive.has(s.tmuxTarget)) { this.exitedSince.delete(s.tmuxTarget); continue; } // gestito da prune
-      let cmd: string;
+      let cmd: string | undefined;
       try { cmd = await this.deps.tmux.paneCommand(s.tmuxTarget); } catch { continue; } // pane illeggibile → conservativo
-      if (!SHELL_NAMES.has(cmd)) { this.exitedSince.delete(s.tmuxTarget); continue; } // qualcosa gira (claude) → vivo
+      if (!claudeGone(cmd)) { this.exitedSince.delete(s.tmuxTarget); continue; } // qualcosa gira (claude) → vivo
       const since = this.exitedSince.get(s.tmuxTarget) ?? now;
       this.exitedSince.set(s.tmuxTarget, since);
       if (now - since >= CLAUDE_EXIT_GRACE_MS) {

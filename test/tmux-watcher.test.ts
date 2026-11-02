@@ -18,7 +18,7 @@ function makeWatcher(tmuxSessions: string[] = [], serverUp = true, env: Record<s
     serverRunning: vi.fn(async () => serverUp),
     listSessions: vi.fn(async () => tmuxSessions),
     paneCwd: vi.fn(async (t: string) => `/home/user/${t.replace('claude:', '')}`),
-    paneCommand: vi.fn(async () => 'ollama'), // default: claude attivo nel pane
+    paneCommand: vi.fn(async (): Promise<string | undefined> => 'ollama'), // default: claude attivo nel pane
     claudeCwd: vi.fn(async (_t: string, _tree?: unknown): Promise<string | undefined> => undefined), // default: nessun processo claude distinguibile
     claudeModel: vi.fn(async (_t: string, _tree?: unknown): Promise<string | undefined> => undefined), // default: nessun --model leggibile
     claudeEffort: vi.fn(async (_t: string, _tree?: unknown): Promise<string | undefined> => undefined), // default: nessun --reasoning-effort leggibile
@@ -187,6 +187,26 @@ describe('TmuxWatcher', () => {
     (watcher as any).exitedSince.set('claude:proj1', Date.now() - 130_000);
     await (watcher as any).poll();
     expect(manager.list()).toHaveLength(1); // conservativo: non rimuove se non può leggere il pane
+  });
+  // zellij keeps a session alive after its last terminal pane closes, so the
+  // client reports "nothing runs here" as undefined rather than a shell name.
+  it('removes a session left with no live pane (paneCommand undefined) after the grace', async () => {
+    const { manager, watcher, tmux } = makeWatcher(['claude:proj1']);
+    tmux.paneCommand.mockResolvedValue(undefined);
+    manager.setArmed(true);
+    manager.registerTerminal({ title: 'proj1', projectDir: '/home/user/proj1', tmuxTarget: 'claude:proj1' });
+    await (watcher as any).poll();
+    expect(manager.list()).toHaveLength(1); // within the grace: the user may relaunch claude
+    (watcher as any).exitedSince.set('claude:proj1', Date.now() - 120_001);
+    await (watcher as any).poll();
+    expect(manager.list()).toHaveLength(0); // a ghost session would otherwise stay in /sessions forever
+  });
+  it('does not register a claude:* session with no live pane', async () => {
+    const { manager, watcher, tmux } = makeWatcher(['claude:proj1']);
+    tmux.paneCommand.mockResolvedValue(undefined);
+    manager.setArmed(true);
+    await (watcher as any).poll();
+    expect(manager.findByTmuxTarget('claude:proj1')).toBeUndefined();
   });
   it('skips a poll that overlaps a slow one still in flight', async () => {
     const { manager, watcher, tmux } = makeWatcher(['claude:proj1']);

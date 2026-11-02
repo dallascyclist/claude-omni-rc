@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+- **zellij support.** Set `MULTIPLEXER=zellij` in `.env` to run terminal
+  sessions in zellij (0.44+) instead of tmux: `claude:<project>` discovery,
+  input, `/view`, `/stop`, `/compact` and question answers go through
+  `zellij action`, and `omni-rc` starts sessions in zellij. tmux stays the
+  default; existing installs are unaffected. The installer selects zellij when
+  it is installed and tmux isn't. A session in the multiplexer the daemon
+  doesn't drive is still mirrored read-only, as before.
+
 ## [0.7.0] - 2026-08-13
 
 - **Plan approval works from the phone on terminal sessions too.** The

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { LOG_LEVELS, type LogLevel } from './log.js';
 import { sanitizeSettings, type UserSettings } from './settings.js';
 import { EFFORT_LEVELS, type EffortLevel } from './types.js';
+import type { MultiplexerKind } from './sessions/tmux-inject.js';
 
 export interface Config {
   telegramBotToken: string;
@@ -28,6 +29,10 @@ export interface Config {
   armedOnStart: boolean;
   idleGraceMs: number;
   pollIntervalMs: number;
+  // Which terminal multiplexer runs the `claude:<project>` sessions: discovery,
+  // input injection, /view and /stop go through it. One at a time — sessions in
+  // the other one are still mirrored read-only through the SessionStart hook.
+  multiplexer: MultiplexerKind;
   // Ogni quanto ricontrollare il cwd del processo claude di una sessione già
   // tracciata. Costa `ps` + `lsof`, quindi non va fatto a ogni poll: serve solo
   // a seguire una sessione che si sposta in un git worktree.
@@ -91,6 +96,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, settings: UserS
     armedOnStart: s.armedOnStart ?? env.ARMED_ON_START === 'true',
     idleGraceMs: parseNum(env, 'IDLE_GRACE_MS', 3000),
     pollIntervalMs: parseNum(env, 'POLL_INTERVAL_MS', 500),
+    multiplexer: (env.MULTIPLEXER ?? '').trim().toLowerCase() === 'zellij' ? 'zellij' : 'tmux',
     cwdRefreshMs: parseNum(env, 'CWD_REFRESH_MS', 10_000),
     noUpdateCheck: s.noUpdateCheck ?? Boolean(env.CLAUDE_OMNI_RC_NO_UPDATE_CHECK),
     logLevel: parseLevel(env, 'LOG_LEVEL', 'info'),

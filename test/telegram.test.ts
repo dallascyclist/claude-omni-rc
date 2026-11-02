@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, startSessionHint, TypingIndicator, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
 import { truncateAtWord, mdToHtml, splitHtmlMessage } from '../bot/render.js';
 import { loadConfig } from '../src/config.js';
@@ -416,6 +416,13 @@ describe('permissionMessage / sessionListText', () => {
     expect(txt).toContain('🧠');               // headless icon
     expect(txt).toContain('just now');
   });
+  it('labels a terminal session without a pane after the multiplexer in use', () => {
+    const sessions = [
+      { id: 'ccc', kind: 'terminal', title: 't3', projectDir: '/z', status: 'idle', lastActivity: new Date().toISOString(), createdAt: '' },
+    ] as any;
+    expect(sessionListText(sessions)).toContain('no tmux');
+    expect(sessionListText(sessions, undefined, 'zellij')).toContain('no zellij');
+  });
   it('formats relative time', () => {
     const now = Date.now();
     expect(relativeTime(new Date(now - 10_000).toISOString())).toBe('just now');
@@ -693,6 +700,16 @@ describe('stopReply', () => {
   it('reports the target for terminal sessions and the no-pane case', () => {
     expect(stopReply({ kind: 'terminal', id8: 'abc', target: 'claude:proj' })).toContain('Ctrl+C');
     expect(stopReply({ kind: 'terminal', id8: 'abc' })).toContain('no tmux');
+    expect(stopReply({ kind: 'terminal', id8: 'abc', mux: 'zellij' })).toContain('no zellij');
+  });
+});
+
+describe('startSessionHint', () => {
+  // the hint is the command users copy from the chat: it must start a session
+  // the configured multiplexer can actually drive
+  it('names the command for the configured multiplexer, escaped for HTML', () => {
+    expect(startSessionHint('tmux')).toBe('tmux new -s claude:&lt;project&gt;');
+    expect(startSessionHint('zellij')).toBe('zellij -s claude:&lt;project&gt;');
   });
 });
 
@@ -975,6 +992,12 @@ describe('diagReport', () => {
     expect(out).toContain('🖥');
     expect(out).toContain('🧠');
     expect(out).toMatch(/\n {2}🖥 terminal · tmux/); // second line indented
+  });
+
+  it('names the multiplexer in use for terminal sessions', () => {
+    const out = diagReport({ ...snapshot, multiplexer: 'zellij' as const });
+    expect(out).toMatch(/\n {2}🖥 terminal · zellij/);
+    expect(out).toContain('no-zellij'); // the headless session has no pane
   });
 
   it('reports the pending interactions, which are what wedges a session', () => {

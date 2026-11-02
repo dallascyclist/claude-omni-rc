@@ -22,10 +22,12 @@ MAX_WAIT=$((PERMISSION_TIMEOUT_SECONDS + 5))
 # Hook request (stdin)
 BODY="$(cat)"
 
-# tmux session the CLI runs in → session id for the daemon
+# tmux/zellij session the CLI runs in → session id for the daemon
 SID=""
 if [ -n "${TMUX:-}" ]; then
   SID="$(tmux display-message -p '#S' 2>/dev/null || true)"
+elif [ -n "${ZELLIJ:-}" ]; then
+  SID="${ZELLIJ_SESSION_NAME:-}"
 fi
 
 # Extracts tool_name + tool_input + tool_use_id from the hook JSON (node is

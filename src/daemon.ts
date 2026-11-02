@@ -13,7 +13,8 @@ import { OllamaClient } from './ollama.js';
 import { SdkDriver } from './sessions/sdk-driver.js';
 import { TmuxWatcher } from './sessions/tmux-watcher.js';
 import { TranscriptWatcher } from './sessions/transcript-watcher.js';
-import { TmuxClient } from './sessions/tmux-inject.js';
+import { TmuxClient, type Multiplexer } from './sessions/tmux-inject.js';
+import { ZellijClient } from './sessions/zellij-inject.js';
 import { Inbox } from './input.js';
 import { startApi } from './api.js';
 import { TelegramBot } from '../bot/telegram.js';
@@ -42,6 +43,7 @@ export function createDaemon(
     version: CURRENT_VERSION,
     pid: process.pid,
     apiPort: config.apiPort,
+    multiplexer: config.multiplexer,
     armedOnStart: config.armedOnStart,
     stateDir: config.stateDir,
     settingsFile: config.settingsFile,
@@ -66,7 +68,7 @@ export function createDaemon(
   });
   const ollama = new OllamaClient({ baseUrl: config.ollamaBaseUrl });
   const sdk = new SdkDriver({ bus, manager, config, permissionFlow, dialogFlow, ollama });
-  const tmux = new TmuxClient();
+  const tmux: Multiplexer = config.multiplexer === 'zellij' ? new ZellijClient() : new TmuxClient();
   const watcher = new TmuxWatcher({ config, manager, tmux });
   const transcriptWatcher = new TranscriptWatcher({ config, manager, bus });
   const inbox = new Inbox({ dir: config.inboxDir });

@@ -8,7 +8,7 @@ import type { SessionManager } from '../src/sessions/manager.js';
 import type { PermissionFlow } from '../src/permissions.js';
 import type { DialogFlow } from '../src/dialogs.js';
 import type { SdkDriver } from '../src/sessions/sdk-driver.js';
-import type { TmuxClient, QuestionKey } from '../src/sessions/tmux-inject.js';
+import type { Multiplexer, MultiplexerKind, QuestionKey } from '../src/sessions/tmux-inject.js';
 import { createShExec } from '../src/sessions/tmux-inject.js';
 import { currentBranch } from '../src/git.js';
 import type { OllamaClient } from '../src/ollama.js';
@@ -562,12 +562,19 @@ export function renderHistory(messages: RecentMessage[], title: string, maxChars
 
 // Risposta di /stop basata sull'esito reale (spec §3.3): mai un generico
 // "Stop requested" quando non c'è nulla da fermare.
+// The command that starts a session the daemon can drive, for the multiplexer
+// in use (HTML-escaped, ready for a <code> block).
+export function startSessionHint(mux: MultiplexerKind): string {
+  return mux === 'zellij' ? 'zellij -s claude:&lt;project&gt;' : 'tmux new -s claude:&lt;project&gt;';
+}
+
 export function stopReply(o: {
   kind: 'headless' | 'terminal';
   id8: string;
   aborted?: boolean;
   status?: string;
   target?: string;
+  mux?: MultiplexerKind;
 }): string {
   if (o.kind === 'headless') {
     return o.aborted
@@ -576,7 +583,7 @@ export function stopReply(o: {
   }
   return o.target
     ? `🛑 Ctrl+C sent to <code>${htmlEscape(o.target)}</code> — generation interrupted.`
-    : 'This terminal session has no tmux pane to interrupt.';
+    : `This terminal session has no ${o.mux ?? 'tmux'} pane to interrupt.`;
 }
 
 // Perché un evento non è stato consegnato. Ogni `return` silenzioso dei gestori
@@ -669,7 +676,7 @@ export function relativeTime(iso: string): string {
 // the target (tmux for terminal sessions, the model for headless ones). On a
 // narrow screen a single line per session wrapped and mixed the facts; the
 // active session is marked with a filled ● and a bold title (▸ was ambiguous).
-export function sessionListText(sessions: Session[], activeId?: string): string {
+export function sessionListText(sessions: Session[], activeId?: string, mux: MultiplexerKind = 'tmux'): string {
   if (!sessions.length) return 'No sessions.';
   return sessions
     .map(s => {
@@ -679,7 +686,7 @@ export function sessionListText(sessions: Session[], activeId?: string): string 
       const status = htmlEscape(s.status);
       const kindIcon = s.kind === 'terminal' ? '🖥' : '🧠';
       const detail = s.kind === 'terminal'
-        ? (s.tmuxTarget ? htmlEscape(s.tmuxTarget) : 'no tmux')
+        ? (s.tmuxTarget ? htmlEscape(s.tmuxTarget) : `no ${mux}`)
         : htmlEscape(s.model ?? 'model');
       const line1 = `${marker} ${active ? `<b>${title}</b>` : title} · ${status} · ${relativeTime(s.lastActivity)}`;
       return `${line1}\n  ${kindIcon} ${detail}`;
@@ -710,6 +717,7 @@ export interface DiagSnapshot {
   sessions: DiagSession[];
   pending: { permissions: number; dialogs: number; questionFlows: number };
   recentErrors: string[];
+  multiplexer?: MultiplexerKind;
 }
 
 export function diagReport(s: DiagSnapshot): string {
@@ -725,7 +733,8 @@ export function diagReport(s: DiagSnapshot): string {
         const marker = active ? '●' : '○';
         const title = htmlEscape(x.title) || htmlEscape(x.id.slice(0, 8));
         const kindIcon = x.kind === 'terminal' ? '🖥' : '🧠';
-        const bits = [x.kind, x.hasTmux ? 'tmux' : 'no-tmux', x.transcript ? 'transcript' : 'no-transcript'];
+        const mux = s.multiplexer ?? 'tmux';
+        const bits = [x.kind, x.hasTmux ? mux : `no-${mux}`, x.transcript ? 'transcript' : 'no-transcript'];
         const modelEffortBranch = [x.model ?? '—', x.effort ?? '—', x.branch ?? '—'].map(htmlEscape).join(' · ');
         const line1 = `${marker} ${active ? `<b>${title}</b>` : title} · ${htmlEscape(x.status)}`;
         return `${line1}\n  ${kindIcon} ${htmlEscape(bits.join(' · '))} · ${modelEffortBranch}`;
@@ -895,7 +904,7 @@ export interface BotDeps {
   permissionFlow: PermissionFlow;
   dialogFlow: DialogFlow;
   sdk: SdkDriver;
-  tmux: TmuxClient;
+  tmux: Multiplexer; // tmux or zellij (MULTIPLEXER)
   inbox: Inbox;
   ollama: OllamaClient;
   settingsStore: SettingsStore;
@@ -1015,7 +1024,7 @@ export class TelegramBot {
       { command: 'new', description: 'Start a headless session' },
       { command: 'stop', description: 'Stop the active session' },
       { command: 'status', description: 'Active session status' },
-      { command: 'attach', description: 'Attach a tmux terminal session' },
+      { command: 'attach', description: `Attach a ${this.deps.config.multiplexer} terminal session` },
       { command: 'history', description: 'Show the last messages of a session' },
       { command: 'delete', description: 'Delete a session' },
       { command: 'usage', description: 'Check provider usage (5h / weekly)' },
@@ -1310,6 +1319,7 @@ export class TelegramBot {
         chatBound: this.chatId !== undefined,
         activeSessionId: this.deps.manager.getActive(),
         sessions: diagSessions,
+        multiplexer: this.deps.config.multiplexer,
         pending: {
           permissions: this.deps.permissionFlow.pendingCount(),
           dialogs: this.deps.dialogFlow.pendingCount(),
@@ -1396,13 +1406,13 @@ export class TelegramBot {
     const list = this.deps.manager.list();
     if (!list.length) {
       await ctx.reply(
-        'No sessions yet.\n\nRun Claude Code inside tmux and it will show up here automatically:\n<code>tmux new -s claude:&lt;project&gt;</code>\n\nOr start a headless session:\n<code>/new &lt;prompt&gt;</code>',
+        `No sessions yet.\n\nRun Claude Code inside ${this.deps.config.multiplexer} and it will show up here automatically:\n<code>${startSessionHint(this.deps.config.multiplexer)}</code>\n\nOr start a headless session:\n<code>/new &lt;prompt&gt;</code>`,
         { parse_mode: 'HTML' });
       return;
     }
     const kb = new InlineKeyboard();
     for (const s of list) kb.text(s.id.slice(0, 6), `sess:select:${s.id}`).text('🗑', `sess:del:${s.id}`).row();
-    await ctx.reply(sessionListText(list, this.deps.manager.getActive()), {
+    await ctx.reply(sessionListText(list, this.deps.manager.getActive(), this.deps.config.multiplexer), {
       parse_mode: 'HTML', reply_markup: kb,
     });
   }
@@ -1491,7 +1501,7 @@ export class TelegramBot {
         await this.send(ctx, `❌ ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
       }
     } else {
-      await this.send(ctx, stopReply({ kind: 'terminal', id8 }));
+      await this.send(ctx, stopReply({ kind: 'terminal', id8, mux: this.deps.config.multiplexer }));
     }
   }
 
@@ -1567,7 +1577,7 @@ export class TelegramBot {
         await this.send(ctx, `❌ ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
       }
     } else {
-      await this.send(ctx, 'This session is not running in tmux, so /compact can’t be sent.');
+      await this.send(ctx, `This session is not running in ${this.deps.config.multiplexer}, so /compact can’t be sent.`);
     }
   }
 
@@ -2148,7 +2158,7 @@ export class TelegramBot {
           if (s) this.deps.manager.setActive(s.id);
           this.syncTyping(); // la sessione appena selezionata può essere già in running
           await ctx.answerCallbackQuery({ text: 'Session selected' });
-          await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.deps.manager.getActive()), { parse_mode: 'HTML' });
+          await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.deps.manager.getActive(), this.deps.config.multiplexer), { parse_mode: 'HTML' });
           // Fix 5: mostra la storia recente della sessione appena selezionata.
           // Una sessione fresca non ha transcript suo → niente storia vecchia, solo
           // una nota (prima mostrava la history della sessione precedente).
@@ -2251,7 +2261,7 @@ export class TelegramBot {
       this.track(this.deps.sdk.runTurn(session.id, text), 'runTurn');
     } else {
       if (!session.tmuxTarget) {
-        await this.send(ctx, 'This session is not running in tmux, so text can’t be injected. Start it with:\n<code>tmux new -s claude:&lt;project&gt;</code>');
+        await this.send(ctx, `This session is not running in ${this.deps.config.multiplexer}, so text can’t be injected. Start it with:\n<code>${startSessionHint(this.deps.config.multiplexer)}</code>`);
         return;
       }
       try {
@@ -2259,7 +2269,7 @@ export class TelegramBot {
         this.recordInjected(session.id, text);
       } catch (e) {
         // tmux giù o pane sparito: errore amichevole, mai un throw che uccide il daemon.
-        await this.send(ctx, `❌ Can't inject into <code>${htmlEscape(session.tmuxTarget)}</code>: ${htmlEscape(e instanceof Error ? e.message : String(e))}. Is tmux running?`);
+        await this.send(ctx, `❌ Can't inject into <code>${htmlEscape(session.tmuxTarget)}</code>: ${htmlEscape(e instanceof Error ? e.message : String(e))}. Is ${this.deps.config.multiplexer} running?`);
       }
     }
   }
@@ -2356,11 +2366,11 @@ export class TelegramBot {
       return;
     }
     if (s.kind !== 'terminal') {
-      await this.send(ctx, 'This is a headless session — it has no terminal screen. Its replies stream here; send a message to chat. To view a terminal, pick a tmux session with /sessions.');
+      await this.send(ctx, `This is a headless session — it has no terminal screen. Its replies stream here; send a message to chat. To view a terminal, pick a ${this.deps.config.multiplexer} session with /sessions.`);
       return;
     }
     if (!s.tmuxTarget) {
-      await this.send(ctx, 'This session is not running in tmux, so there is no pane to capture. Start it with:\n<code>tmux new -s claude:&lt;project&gt;</code>');
+      await this.send(ctx, `This session is not running in ${this.deps.config.multiplexer}, so there is no pane to capture. Start it with:\n<code>${startSessionHint(this.deps.config.multiplexer)}</code>`);
       return;
     }
     try {

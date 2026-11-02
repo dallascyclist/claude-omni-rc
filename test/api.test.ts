@@ -44,6 +44,48 @@ describe('startApi', () => {
     expect(session!.projectDir).toBe('/tmp/proj');
   });
 
+  it('keeps the target of a session in the multiplexer the daemon drives', async () => {
+    const { manager, api } = makeApi({ MULTIPLEXER: 'zellij' });
+    open.push(api);
+    await api.ready;
+    const res = await fetch(`http://127.0.0.1:${api.port()}/api/attach`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectDir: '/tmp/proj', tmuxTarget: 'claude:proj', multiplexer: 'zellij' }),
+    });
+    expect(res.status).toBe(200);
+    expect(manager.findByTmuxTarget('claude:proj')).toBeDefined();
+  });
+
+  it('drops a target from the other multiplexer and mirrors the session read-only', async () => {
+    const { manager, api } = makeApi(); // tmux daemon
+    open.push(api);
+    await api.ready;
+    const res = await fetch(`http://127.0.0.1:${api.port()}/api/attach`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectDir: '/tmp/proj', tmuxTarget: 'claude:proj', multiplexer: 'zellij' }),
+    });
+    expect(res.status).toBe(200);
+    // the tmux watcher would never see claude:proj alive and would prune it
+    expect(manager.findByTmuxTarget('claude:proj')).toBeUndefined();
+    expect(manager.list()).toHaveLength(1);
+    expect(manager.list()[0].projectDir).toBe('/tmp/proj');
+  });
+
+  it('treats a target without multiplexer (older hook) as a tmux one', async () => {
+    const { manager, api } = makeApi({ MULTIPLEXER: 'zellij' });
+    open.push(api);
+    await api.ready;
+    await fetch(`http://127.0.0.1:${api.port()}/api/attach`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectDir: '/tmp/proj', tmuxTarget: 'claude:proj' }),
+    });
+    expect(manager.findByTmuxTarget('claude:proj')).toBeUndefined();
+    expect(manager.list()).toHaveLength(1);
+  });
+
   it('lists sessions via GET /api/sessions', async () => {
     const { manager, api } = makeApi();
     open.push(api);

@@ -48,7 +48,14 @@ tmux (terminal sessions)                headless sessions (/new)
 - **`SessionManager`** is the single owner of the session registry and the
   armed switch, persisted atomically by `StateStore`.
 - **`TmuxClient`** is the only thing that writes into a pane (`send-keys`) and
-  reads a screen (`capture-pane`).
+  reads a screen (`capture-pane`) — or **`ZellijClient`** (`zellij-inject.ts`)
+  when `MULTIPLEXER=zellij`. Both implement the `Multiplexer` interface in
+  `tmux-inject.ts`; the watcher and the bot only see that interface, so a
+  change to one client's behaviour usually needs the same change in the other.
+  zellij differs in ways that matter here: a session survives its last
+  terminal pane (`paneCommand` returns `undefined`), dead sessions are listed
+  as EXITED, and every action must name its pane (`--pane-id`) because the
+  focused pane can be a plugin.
 
 ## Rules that hold the whole thing together
 

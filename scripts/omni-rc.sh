@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
-# omni-rc — start a Claude Code session inside tmux, ready for remote control.
+# omni-rc — start a Claude Code session inside tmux (or zellij), ready for remote control.
 #
 #   omni-rc <name> [options]
 #
 # Creates (or reattaches to) a tmux session named `claude:<name>` running
 # Claude Code, so the claude-omni-rc daemon can mirror it, inject input and
 # capture its screen. If the session already exists, omni-rc just attaches.
+# With MULTIPLEXER=zellij in .env (or the environment) it uses a zellij session
+# of the same name instead.
 #
 # The provider is chosen automatically, the same way as headless sessions:
 #   - a model starting with `claude-` (or the opus/sonnet/haiku/fable aliases)
@@ -22,7 +24,7 @@
 #   -p, --prompt <text> send <text> as the first message
 #   -d, --detach        create the session but don't attach to it
 #   -k, --kill          kill the claude:<name> session instead of starting it
-#   -l, --list          list all claude:* tmux sessions and exit
+#   -l, --list          list all claude:* sessions and exit
 #   -h, --help          show this help
 #   --                  everything after is passed to claude verbatim
 #
@@ -65,75 +67,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ "$LIST" -eq 1 ]; then
-  if command -v tmux >/dev/null 2>&1; then
-    tmux ls -F '#{session_name}' 2>/dev/null | grep '^claude:' || echo "No claude:* sessions."
-  else
-    echo "tmux is not installed."
-  fi
-  exit 0
-fi
-
-if [ -z "$NAME" ]; then
-  echo "omni-rc: missing session name" >&2
-  usage
-fi
-
-# tmux session names can't contain ':' and a name with spaces is asking for trouble
-case "$NAME" in
-  *:*|*' '*|'') echo "omni-rc: invalid session name '$NAME' (no spaces or colons)" >&2; exit 1 ;;
-esac
-
-if ! command -v tmux >/dev/null 2>&1; then
-  echo "omni-rc: tmux is not installed" >&2
-  exit 1
-fi
-
-SESSION="claude:$NAME"
-
-# tmux reads `claude:<name>` as session:window, so a colon-named session can't
-# be targeted by name. Resolve it to its session id (`$0`…) — unique and stable.
-resolve_target() {
-  tmux list-sessions -F '#{session_id} #{session_name}' 2>/dev/null | awk -v want="$1" '$2 == want { print $1; exit }'
-}
-
-TARGET="$(resolve_target "$SESSION")"
-
-if [ "$KILL" -eq 1 ]; then
-  if [ -n "$TARGET" ]; then
-    tmux kill-session -t "$TARGET"
-    echo "Killed $SESSION."
-  else
-    echo "No session $SESSION."
-  fi
-  exit 0
-fi
-
-# already running → just attach (or report when detached)
-if [ -n "$TARGET" ]; then
-  if [ "$DETACH" -eq 1 ]; then
-    echo "$SESSION is already running."
-    exit 0
-  fi
-  echo "Attaching to existing $SESSION…"
-  exec tmux attach-session -t "$TARGET"
-fi
-
-# --- provider: quale backend per questa sessione? ---------------------------
-# Stessa filosofia "omni" del driver headless: il provider è quello configurato
-# in .env; senza config esplicita si usa Ollama; un modello `claude-*` (o gli
-# alias opus/sonnet/haiku/fable) significa Anthropic.
-#
-#  1. ANTHROPIC_BASE_URL esplicito (≠ Ollama) → provider custom (proxy o
-#     Anthropic): vince per qualunque modello.
-#  2. modello Anthropic → Anthropic nativo (auth di Claude Code: OAuth o key).
-#  3. altrimenti → Ollama: replica `ollama launch claude` (token placeholder +
-#     mapping dei modelli default + context length reale).
-#
-# L'env arriva a claude INIETTATO nel comando del pane (env KEY=VAL … claude …):
-# senza `-e`, `tmux new-session` usa l'env del server, non quello del client,
-# quindi un semplice `export` qui NON raggiungerebbe la sessione.
-
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$REPO_DIR/.env"
 
@@ -152,6 +85,98 @@ pick() {
   if [ -n "$v" ]; then printf '%s' "$v"; return; fi
   printf '%s' "$def"
 }
+
+# --- multiplexer: the one the daemon drives (MULTIPLEXER, default tmux) -----
+MUX="$(pick MULTIPLEXER tmux | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+[ "$MUX" = "zellij" ] || MUX="tmux"
+
+# Live zellij sessions, one name per line. EXITED ones are dead sessions kept
+# for resurrection: they don't count as running.
+zellij_live() {
+  zellij list-sessions --no-formatting 2>/dev/null | grep -v '(EXITED' | sed 's/ \[Created.*$//'
+}
+
+if [ "$LIST" -eq 1 ]; then
+  if ! command -v "$MUX" >/dev/null 2>&1; then
+    echo "$MUX is not installed."
+  elif [ "$MUX" = "zellij" ]; then
+    zellij_live | grep '^claude:' || echo "No claude:* sessions."
+  else
+    tmux ls -F '#{session_name}' 2>/dev/null | grep '^claude:' || echo "No claude:* sessions."
+  fi
+  exit 0
+fi
+
+if [ -z "$NAME" ]; then
+  echo "omni-rc: missing session name" >&2
+  usage
+fi
+
+# tmux session names can't contain ':' and a name with spaces is asking for trouble
+case "$NAME" in
+  *:*|*' '*|'') echo "omni-rc: invalid session name '$NAME' (no spaces or colons)" >&2; exit 1 ;;
+esac
+
+if ! command -v "$MUX" >/dev/null 2>&1; then
+  echo "omni-rc: $MUX is not installed" >&2
+  exit 1
+fi
+
+SESSION="claude:$NAME"
+
+# tmux reads `claude:<name>` as session:window, so a colon-named session can't
+# be targeted by name. Resolve it to its session id (`$0`…) — unique and stable.
+resolve_target() {
+  tmux list-sessions -F '#{session_id} #{session_name}' 2>/dev/null | awk -v want="$1" '$2 == want { print $1; exit }'
+}
+
+# TARGET is what later commands address: the tmux session id, or for zellij the
+# session name itself (zellij takes colons in names as they are).
+if [ "$MUX" = "zellij" ]; then
+  TARGET="$(zellij_live | grep -xF "$SESSION" || true)"
+else
+  TARGET="$(resolve_target "$SESSION")"
+fi
+
+if [ "$KILL" -eq 1 ]; then
+  if [ -n "$TARGET" ]; then
+    if [ "$MUX" = "zellij" ]; then
+      zellij delete-session --force "$SESSION" >/dev/null
+    else
+      tmux kill-session -t "$TARGET"
+    fi
+    echo "Killed $SESSION."
+  else
+    echo "No session $SESSION."
+  fi
+  exit 0
+fi
+
+# already running → just attach (or report when detached)
+if [ -n "$TARGET" ]; then
+  if [ "$DETACH" -eq 1 ]; then
+    echo "$SESSION is already running."
+    exit 0
+  fi
+  echo "Attaching to existing $SESSION…"
+  [ "$MUX" = "zellij" ] && exec zellij attach "$SESSION"
+  exec tmux attach-session -t "$TARGET"
+fi
+
+# --- provider: quale backend per questa sessione? ---------------------------
+# Stessa filosofia "omni" del driver headless: il provider è quello configurato
+# in .env; senza config esplicita si usa Ollama; un modello `claude-*` (o gli
+# alias opus/sonnet/haiku/fable) significa Anthropic.
+#
+#  1. ANTHROPIC_BASE_URL esplicito (≠ Ollama) → provider custom (proxy o
+#     Anthropic): vince per qualunque modello.
+#  2. modello Anthropic → Anthropic nativo (auth di Claude Code: OAuth o key).
+#  3. altrimenti → Ollama: replica `ollama launch claude` (token placeholder +
+#     mapping dei modelli default + context length reale).
+#
+# L'env arriva a claude INIETTATO nel comando del pane (env KEY=VAL … claude …):
+# senza `-e`, `tmux new-session` usa l'env del server, non quello del client,
+# quindi un semplice `export` qui NON raggiungerebbe la sessione.
 
 OLLAMA_BASE_URL="$(pick OLLAMA_BASE_URL 'http://127.0.0.1:11434')"
 DEFAULT_MODEL="$(pick DEFAULT_MODEL 'deepseek-v4-flash:cloud')"
@@ -205,10 +230,11 @@ else
 fi
 
 # build the claude command
+CLAUDE_BARE=(claude --model "$MODEL")
+[ "${#CLAUDE_ARGS[@]}" -gt 0 ] && CLAUDE_BARE+=("${CLAUDE_ARGS[@]}")
 CLAUDE_CMD=()
 [ "${#ENV_PREFIX[@]}" -gt 0 ] && CLAUDE_CMD+=(env "${ENV_PREFIX[@]}")
-CLAUDE_CMD+=(claude --model "$MODEL")
-[ "${#CLAUDE_ARGS[@]}" -gt 0 ] && CLAUDE_CMD+=("${CLAUDE_ARGS[@]}")
+CLAUDE_CMD+=("${CLAUDE_BARE[@]}")
 
 CWD="${CWD:-$PWD}"
 if [ ! -d "$CWD" ]; then
@@ -220,20 +246,57 @@ if ! command -v claude >/dev/null 2>&1; then
   echo "omni-rc: 'claude' not found on PATH — the session will start but Claude Code won't." >&2
 fi
 
-if ! tmux new-session -d -s "$SESSION" -c "$CWD" "${CLAUDE_CMD[@]}"; then
-  echo "omni-rc: failed to create $SESSION" >&2
-  exit 1
+if [ "$MUX" = "zellij" ]; then
+  # zellij keeps a session alive after its command pane exits (tmux closes it),
+  # so the pane runs a wrapper that deletes the session once claude is done —
+  # otherwise `omni-rc <name>` would later reattach to an empty session. `set -m`
+  # puts claude in its own foreground process group: zellij reports the
+  # foreground process as the pane command, and the daemon must see `claude`
+  # there, not the `sh` wrapper (which it would take for an idle shell).
+  # The session starts in the creating client's cwd, hence the subshell.
+  # The provider env goes to the zellij client, whose environment the new
+  # session server and its pane inherit — not onto the pane's command line:
+  # the wrapper's argv lives as long as the session (visible in `ps`) and zellij
+  # saves pane commands to disk for resurrection, tokens included.
+  ZELLIJ_BIN="$(command -v zellij)"
+  # A dead (EXITED) session of the same name — zellij crashed, the machine
+  # rebooted — would be resurrected by `attach` instead of running claude.
+  # It isn't live (checked above), so delete-session without --force only
+  # removes its resurrection data.
+  zellij delete-session "$SESSION" >/dev/null 2>&1 || true
+  if ! ( cd "$CWD" && env ${ENV_PREFIX[@]+"${ENV_PREFIX[@]}"} zellij attach --create-background "$SESSION" -- \
+      sh -c 'set -m; z="$1"; shift; "$@"; "$z" delete-session --force "$ZELLIJ_SESSION_NAME" >/dev/null 2>&1' \
+      sh "$ZELLIJ_BIN" "${CLAUDE_BARE[@]}" ); then
+    echo "omni-rc: failed to create $SESSION" >&2
+    exit 1
+  fi
+  TARGET="$SESSION"
+else
+  if ! tmux new-session -d -s "$SESSION" -c "$CWD" "${CLAUDE_CMD[@]}"; then
+    echo "omni-rc: failed to create $SESSION" >&2
+    exit 1
+  fi
+  TARGET="$(resolve_target "$SESSION")"
 fi
-TARGET="$(resolve_target "$SESSION")"
 
 if [ -n "$PROMPT" ] && [ -n "$TARGET" ]; then
   # let claude boot, then send the prompt as the first message
-  ( sleep 2; tmux send-keys -t "$TARGET" "$PROMPT" Enter ) &
+  if [ "$MUX" = "zellij" ]; then
+    # terminal_0 is the command pane of a session created just above; without
+    # --pane-id the text would go to the focused pane, which can be a plugin.
+    ( sleep 2
+      zellij --session "$SESSION" action write-chars --pane-id terminal_0 -- "$PROMPT"
+      zellij --session "$SESSION" action send-keys --pane-id terminal_0 Enter ) >/dev/null 2>&1 &
+  else
+    ( sleep 2; tmux send-keys -t "$TARGET" "$PROMPT" Enter ) &
+  fi
 fi
 
 echo "Started $SESSION in $CWD."
 if [ "$DETACH" -eq 1 ]; then
   echo "Detached — attach later with: omni-rc $NAME"
+elif [ "$MUX" = "zellij" ]; then
+  exec zellij attach "$SESSION"
 else
   exec tmux attach-session -t "$TARGET"
 fi
