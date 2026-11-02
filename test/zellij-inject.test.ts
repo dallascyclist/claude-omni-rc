@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
-  ZellijClient, parseZellijSessions, pickPane, commandName, toZellijKey, findServerPid,
-  type ZellijPane,
+  ZellijClient, parseZellijSessions, pickPane, pickInputPane, commandName, toZellijKey, findServerPid,
+  READ_TTL_MS, type ZellijPane,
 } from '../src/sessions/zellij-inject.js';
 import type { ExecFn, ExecResult, ShExecFn } from '../src/sessions/tmux-inject.js';
 
@@ -17,11 +17,15 @@ const ok = (stdout = ''): ExecResult => ({ code: 0, stdout, stderr: '' });
 
 // Fake zellij: answers list-sessions / list-panes from fixtures, records every
 // call, and succeeds on any other action unless told to fail it.
-function fakeZellij(o: { sessions?: string; panes?: ZellijPane[]; screen?: string; fail?: string } = {}) {
+function fakeZellij(o: { sessions?: string; noSessions?: boolean; panes?: ZellijPane[]; screen?: string; fail?: string } = {}) {
   const calls: string[][] = [];
   const exec: ExecFn = async args => {
     calls.push(args);
-    if (args[0] === 'list-sessions') return o.sessions === undefined ? { code: 1, stdout: '', stderr: 'boom' } : ok(o.sessions);
+    if (args[0] === 'list-sessions') {
+      // zellij 0.46 with no session at all, live or EXITED
+      if (o.noSessions) return { code: 1, stdout: '', stderr: 'No active zellij sessions found.\n' };
+      return o.sessions === undefined ? { code: 1, stdout: '', stderr: 'boom' } : ok(o.sessions);
+    }
     const action = args[3];
     if (action === o.fail) return { code: 1, stdout: '', stderr: `${action} broke` };
     if (action === 'list-panes') return ok(JSON.stringify(o.panes ?? []));
@@ -70,6 +74,21 @@ describe('pickPane', () => {
   });
 });
 
+describe('pickInputPane', () => {
+  const shell: ZellijPane = { id: 2, is_plugin: false, is_focused: true, exited: false, pane_command: '/bin/zsh' };
+  const editor: ZellijPane = { id: 4, is_plugin: false, is_focused: false, exited: false, pane_command: 'vim notes.md' };
+  it('targets the claude pane among several', () => {
+    expect(pickInputPane([shell, editor, claudePane])?.id).toBe(0);
+  });
+  it('refuses to guess when several panes are live and none runs claude', () => {
+    // the focused shell would run the Telegram message as a command
+    expect(pickInputPane([...PLUGINS, shell, editor])).toBeUndefined();
+  });
+  it('uses a lone terminal pane, like tmux does', () => {
+    expect(pickInputPane([...PLUGINS, shell])?.id).toBe(2);
+  });
+});
+
 describe('commandName', () => {
   it('reduces a full command line to the program name', () => {
     expect(commandName('/bin/zsh')).toBe('zsh'); // must match SHELL_NAMES
@@ -111,6 +130,13 @@ describe('ZellijClient', () => {
     await expect(new ZellijClient(down.exec).listSessions()).resolves.toEqual([]);
     await expect(new ZellijClient(down.exec).serverRunning()).resolves.toBe(false); // → the watcher won't prune
   });
+  it('reports "no sessions at all" as running and empty, so the last session can be pruned', async () => {
+    const { exec } = fakeZellij({ noSessions: true });
+    // zellij exits 1 here: read as "down", the last claude session would stay
+    // in /sessions forever because the watcher never prunes while down
+    await expect(new ZellijClient(exec).serverRunning()).resolves.toBe(true);
+    await expect(new ZellijClient(exec).listSessions()).resolves.toEqual([]);
+  });
   it('captures the claude pane by id, not the focused plugin', async () => {
     const { exec, calls } = fakeZellij({ panes: [...PLUGINS, claudePane], screen: 'screen\ncontent' });
     await expect(new ZellijClient(exec).capturePane('claude:proj')).resolves.toBe('screen\ncontent');
@@ -138,8 +164,18 @@ describe('ZellijClient', () => {
   });
   it('refuses to inject when the session has no terminal pane', async () => {
     const { exec, calls } = fakeZellij({ panes: PLUGINS });
-    await expect(new ZellijClient(exec).injectText('claude:proj', 'hi')).rejects.toThrow('no terminal pane');
+    await expect(new ZellijClient(exec).injectText('claude:proj', 'hi')).rejects.toThrow('no pane running claude');
     expect(calls).toHaveLength(1); // nothing typed anywhere
+  });
+  it('never types into a non-claude pane of a multi-pane session, but /view still captures', async () => {
+    const shell: ZellijPane = { id: 2, is_plugin: false, is_focused: true, exited: false, pane_command: '/bin/zsh' };
+    const editor: ZellijPane = { id: 4, is_plugin: false, is_focused: false, exited: false, pane_command: 'vim' };
+    const { exec, calls } = fakeZellij({ panes: [shell, editor], screen: 'prompt$' });
+    const z = new ZellijClient(exec);
+    await expect(z.injectText('claude:proj', 'rm -rf build')).rejects.toThrow('no pane running claude');
+    await expect(z.sendKeys('claude:proj', 'C-c')).rejects.toThrow('no pane running claude');
+    expect(calls.filter(c => ['paste', 'send-keys', 'write-chars'].includes(c[3]))).toHaveLength(0);
+    await expect(z.capturePane('claude:proj')).resolves.toBe('prompt$'); // read-only: the focused pane is fine
   });
   it('surfaces a failed paste as an error', async () => {
     const { exec } = fakeZellij({ panes: [claudePane], fail: 'paste' });
@@ -163,6 +199,39 @@ describe('ZellijClient', () => {
       ['write-chars', '--pane-id', 'terminal_0', '--', 'my answer'], // typed, not pasted: a paste breaks the menu
       ['send-keys', '--pane-id', 'terminal_0', 'Enter'],
     ]);
+  });
+});
+
+describe('ZellijClient read cache', () => {
+  it('answers a poll\'s serverRunning + listSessions with one zellij call, and re-reads after the TTL', async () => {
+    vi.useFakeTimers();
+    try {
+      const { exec, calls } = fakeZellij({ sessions: 'claude:proj [Created 8s ago]\n' });
+      const z = new ZellijClient(exec);
+      await z.serverRunning();
+      await z.listSessions();
+      expect(calls).toHaveLength(1); // CPU: a zellij call costs ~5x a tmux one
+      vi.advanceTimersByTime(READ_TTL_MS);
+      await z.listSessions();
+      expect(calls).toHaveLength(2); // a dead session must not look alive for long
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('reuses the pane command between polls but reads panes fresh for input', async () => {
+    vi.useFakeTimers();
+    try {
+      const { exec, calls } = fakeZellij({ panes: [claudePane] });
+      const z = new ZellijClient(exec);
+      await z.paneCommand('claude:proj');
+      await z.paneCommand('claude:proj');
+      expect(calls.filter(c => c[3] === 'list-panes')).toHaveLength(1);
+      await z.injectText('claude:proj', 'hi');
+      // a pane id cached from before could point at a pane that is gone
+      expect(calls.filter(c => c[3] === 'list-panes')).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

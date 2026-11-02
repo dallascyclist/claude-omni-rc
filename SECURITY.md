@@ -71,6 +71,10 @@ These are real and not yet fixed. They are listed here rather than hidden.
   chat bound last receives the streams. Any authorized user can rebind it.
 - **`/attach <project>` does not reject `..`** in the project name, so it can
   point a tracked session outside `WORKSPACE_DIRS`.
+- **With `MULTIPLEXER=zellij`, messages pass through `ps`.** zellij takes input
+  as a command-line argument (`zellij action paste`), so each message you send
+  to a terminal session is briefly visible to other accounts on the same
+  machine. tmux receives it on stdin.
 - **Secrets live in `.env` in plain text**, and the bot token also appears in the
   file-download URLs the daemon builds. Keep the repo directory private.
 

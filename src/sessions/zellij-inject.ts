@@ -57,6 +57,24 @@ export function pickPane(panes: ZellijPane[]): ZellijPane | undefined {
   return live.find(p => runsClaude(p.pane_command)) ?? live.find(p => p.is_focused) ?? live[0];
 }
 
+// The pane that receives input: stricter than pickPane. With several live
+// panes and none running claude (claude exited, or was started by a wrapper
+// script), the fallback would type a Telegram message plus Enter into whatever
+// pane is focused — an editor, or a shell that runs it. Refuse instead. A lone
+// pane keeps tmux's behaviour: it is the session's pane.
+export function pickInputPane(panes: ZellijPane[]): ZellijPane | undefined {
+  const live = panes.filter(p => !p.is_plugin && !p.exited);
+  return live.find(p => runsClaude(p.pane_command)) ?? (live.length === 1 ? live[0] : undefined);
+}
+
+// How long the read-only answers the watcher polls (session list, pane
+// command) are reused. Every poll asks for the session list twice and for each
+// tracked session's pane command, and a zellij CLI call costs ~10ms of CPU
+// against ~2ms for tmux: re-asking every POLL_INTERVAL_MS tripled the daemon's
+// idle CPU. A second of staleness is harmless next to the 30s/120s prune
+// graces; input, capture and cwd always read fresh panes.
+export const READ_TTL_MS = 1000;
+
 // The bot speaks tmux key names (`C-c`); zellij spells modifiers as words.
 // Named keys used by the question menus (Down, Enter) and digits are the same.
 export function toZellijKey(key: string): string {
@@ -79,28 +97,46 @@ export function findServerPid(psOutput: string, session: string): string | undef
 }
 
 export class ZellijClient implements Multiplexer {
+  private reads = new Map<string, { at: number; value: Promise<unknown> }>();
+
   constructor(
     private exec: ExecFn = createZellijExec(),
     private sh: ShExecFn = createShExec(),
   ) {}
 
+  private cached<T>(key: string, read: () => Promise<T>): Promise<T> {
+    const now = Date.now();
+    const hit = this.reads.get(key);
+    if (hit && now - hit.at < READ_TTL_MS) return hit.value as Promise<T>;
+    const value = read();
+    this.reads.set(key, { at: now, value });
+    return value;
+  }
+
   async processTree(): Promise<ProcessTree | undefined> {
     return snapshotProcesses(this.sh);
   }
 
-  async listSessions(): Promise<string[]> {
-    const r = await this.exec(['list-sessions', '--no-formatting']);
-    if (r.code !== 0) return [];
-    return parseZellijSessions(r.stdout);
+  // zellij has no single server: each session is its own. With no session at
+  // all — live or EXITED — `list-sessions` exits 1 with this message: a definite
+  // "there are none", so the last claude session still gets pruned after its
+  // grace. Any other failure is ambiguous and reported as not running, which
+  // makes the watcher skip pruning, as it does when the tmux server is down.
+  private listing(): Promise<{ ok: boolean; names: string[] }> {
+    return this.cached('list-sessions', async () => {
+      const r = await this.exec(['list-sessions', '--no-formatting']);
+      if (r.code === 0) return { ok: true, names: parseZellijSessions(r.stdout) };
+      if (`${r.stderr}${r.stdout}`.includes('No active zellij sessions found')) return { ok: true, names: [] };
+      return { ok: false, names: [] };
+    });
   }
 
-  // zellij has no single server: each session is its own. A failing
-  // `list-sessions` is the closest thing to a tmux server that is down, and the
-  // watcher skips pruning on it; a successful but empty listing means every
-  // session is really gone, and those get pruned after their grace.
+  async listSessions(): Promise<string[]> {
+    return (await this.listing()).names;
+  }
+
   async serverRunning(): Promise<boolean> {
-    const r = await this.exec(['list-sessions', '--no-formatting']);
-    return r.code === 0;
+    return (await this.listing()).ok;
   }
 
   private async panes(target: string): Promise<ZellijPane[]> {
@@ -115,6 +151,12 @@ export class ZellijClient implements Multiplexer {
     const p = pickPane(await this.panes(target));
     if (!p) throw new Error(`zellij session has no terminal pane: ${target}`);
     return p;
+  }
+
+  private async inputPane(target: string): Promise<string> {
+    const p = pickInputPane(await this.panes(target));
+    if (!p) throw new Error(`no pane running claude in zellij session ${target}`);
+    return `terminal_${p.id}`;
   }
 
   private async action(target: string, args: string[]): Promise<string> {
@@ -138,7 +180,7 @@ export class ZellijClient implements Multiplexer {
   }
 
   async paneCommand(target: string): Promise<string | undefined> {
-    const p = pickPane(await this.panes(target));
+    const p = pickPane(await this.cached(`panes:${target}`, () => this.panes(target)));
     if (!p) return undefined; // no live terminal pane: nothing can be running claude
     if (!p.pane_command) throw new Error(`zellij pane has no command: ${target}`);
     return commandName(p.pane_command);
@@ -190,13 +232,13 @@ export class ZellijClient implements Multiplexer {
   // multi-line message arrives as one prompt; then Enter submits it. `--` keeps
   // a message starting with "-" from being parsed as a zellij flag.
   async injectText(target: string, text: string): Promise<void> {
-    const pane = `terminal_${(await this.pane(target)).id}`;
+    const pane = await this.inputPane(target);
     await this.action(target, ['paste', '--pane-id', pane, '--', text]);
     await this.action(target, ['send-keys', '--pane-id', pane, 'Enter']);
   }
 
   async sendKeys(target: string, keys: string): Promise<void> {
-    const pane = `terminal_${(await this.pane(target)).id}`;
+    const pane = await this.inputPane(target);
     await this.action(target, ['send-keys', '--pane-id', pane, toZellijKey(keys)]);
   }
 
@@ -204,7 +246,7 @@ export class ZellijClient implements Multiplexer {
   // Ink menu needs between keys. Text goes through write-chars (typed, no
   // bracketed paste): a paste corrupts the menu's "Type something" field.
   async sendKeySeq(target: string, seq: QuestionKey[], opts: { delayMs?: number } = {}): Promise<void> {
-    const pane = `terminal_${(await this.pane(target)).id}`;
+    const pane = await this.inputPane(target);
     const delayMs = opts.delayMs ?? 500;
     for (const step of seq) {
       const args = step.kind === 'key'

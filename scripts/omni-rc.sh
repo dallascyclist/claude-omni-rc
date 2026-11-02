@@ -264,7 +264,9 @@ if [ "$MUX" = "zellij" ]; then
   # It isn't live (checked above), so delete-session without --force only
   # removes its resurrection data.
   zellij delete-session "$SESSION" >/dev/null 2>&1 || true
-  if ! ( cd "$CWD" && env ${ENV_PREFIX[@]+"${ENV_PREFIX[@]}"} zellij attach --create-background "$SESSION" -- \
+  # TMUX/TMUX_PANE are dropped so that, run from a tmux pane, the session's
+  # panes don't look nested to the hooks (they would report the outer tmux).
+  if ! ( cd "$CWD" && env -u TMUX -u TMUX_PANE ${ENV_PREFIX[@]+"${ENV_PREFIX[@]}"} zellij attach --create-background "$SESSION" -- \
       sh -c 'set -m; z="$1"; shift; "$@"; "$z" delete-session --force "$ZELLIJ_SESSION_NAME" >/dev/null 2>&1' \
       sh "$ZELLIJ_BIN" "${CLAUDE_BARE[@]}" ); then
     echo "omni-rc: failed to create $SESSION" >&2

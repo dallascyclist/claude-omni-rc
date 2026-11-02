@@ -26,14 +26,21 @@ set -uo pipefail
 PORT="${API_PORT:-4123}"
 BASE="http://127.0.0.1:${PORT}"
 PROJECT_DIR="$(pwd 2>/dev/null || printf '%s' "${HOME:-}")"
+TMUX_NAME=""
+[ -n "${TMUX:-}" ] && TMUX_NAME="$(tmux display-message -p '#S' 2>/dev/null || true)"
+ZELLIJ_NAME=""
+[ -n "${ZELLIJ:-}" ] && ZELLIJ_NAME="${ZELLIJ_SESSION_NAME:-}"
+# Nested multiplexers (zellij started from a tmux pane, or the reverse) set both
+# variables. The claude:<project> session is the one claude runs in; when that
+# doesn't settle it, tmux wins, as it did before zellij support.
 TMUX_TARGET=""
 MULTIPLEXER=""
-if [ -n "${TMUX:-}" ]; then
-  TMUX_TARGET="$(tmux display-message -p '#S' 2>/dev/null || true)"
-  MULTIPLEXER="tmux"
-elif [ -n "${ZELLIJ:-}" ] && [ -n "${ZELLIJ_SESSION_NAME:-}" ]; then
-  TMUX_TARGET="$ZELLIJ_SESSION_NAME"
+if [ -n "$ZELLIJ_NAME" ] && { [ -z "$TMUX_NAME" ] || { [ "${ZELLIJ_NAME#claude:}" != "$ZELLIJ_NAME" ] && [ "${TMUX_NAME#claude:}" = "$TMUX_NAME" ]; }; }; then
+  TMUX_TARGET="$ZELLIJ_NAME"
   MULTIPLEXER="zellij"
+elif [ -n "$TMUX_NAME" ]; then
+  TMUX_TARGET="$TMUX_NAME"
+  MULTIPLEXER="tmux"
 fi
 
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }

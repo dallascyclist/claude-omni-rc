@@ -22,12 +22,16 @@ MAX_WAIT=$((PERMISSION_TIMEOUT_SECONDS + 5))
 # Hook request (stdin)
 BODY="$(cat)"
 
-# tmux/zellij session the CLI runs in → session id for the daemon
-SID=""
-if [ -n "${TMUX:-}" ]; then
-  SID="$(tmux display-message -p '#S' 2>/dev/null || true)"
-elif [ -n "${ZELLIJ:-}" ]; then
-  SID="${ZELLIJ_SESSION_NAME:-}"
+# tmux/zellij session the CLI runs in → session id for the daemon. Nested
+# multiplexers set both variables: same choice as attach.sh — the claude:*
+# session, else tmux.
+TMUX_NAME=""
+[ -n "${TMUX:-}" ] && TMUX_NAME="$(tmux display-message -p '#S' 2>/dev/null || true)"
+ZELLIJ_NAME=""
+[ -n "${ZELLIJ:-}" ] && ZELLIJ_NAME="${ZELLIJ_SESSION_NAME:-}"
+SID="$TMUX_NAME"
+if [ -n "$ZELLIJ_NAME" ] && { [ -z "$TMUX_NAME" ] || { [ "${ZELLIJ_NAME#claude:}" != "$ZELLIJ_NAME" ] && [ "${TMUX_NAME#claude:}" = "$TMUX_NAME" ]; }; }; then
+  SID="$ZELLIJ_NAME"
 fi
 
 # Extracts tool_name + tool_input + tool_use_id from the hook JSON (node is

@@ -8,7 +8,10 @@
   `zellij action`, and `omni-rc` starts sessions in zellij. tmux stays the
   default; existing installs are unaffected. The installer selects zellij when
   it is installed and tmux isn't. A session in the multiplexer the daemon
-  doesn't drive is still mirrored read-only, as before.
+  doesn't drive is still mirrored read-only, as before. Restart the daemon
+  after updating (`scripts/restart.sh`): the hooks run from the repo and report
+  zellij sessions at once, and a daemon still on the old code would register
+  them and then drop them from `/sessions` 30 seconds later.
 
 ## [0.7.0] - 2026-08-13
 

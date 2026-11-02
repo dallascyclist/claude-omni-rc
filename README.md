@@ -134,8 +134,10 @@ zellij -s claude:my-project                 # or start one by hand, then run cla
 The daemon drives one multiplexer at a time. A session running in the other one
 is still mirrored to Telegram through the `SessionStart` hook, read-only. In a
 zellij session with several panes, the pane running `claude` is the one that
-receives input. When claude exits in a session started by `omni-rc`, the
-session closes like a tmux one does.
+receives input; if no pane runs `claude` (for instance it was started by a
+wrapper script), input is refused rather than typed into another pane. When
+claude exits in a session started by `omni-rc`, the session closes like a tmux
+one does.
 
 | Command | What it does |
 |---------|--------------|
