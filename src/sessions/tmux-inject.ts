@@ -49,27 +49,102 @@ export interface ProcessTree {
   comms: Map<string, string>;
 }
 
-export class TmuxClient {
+export type MultiplexerKind = 'tmux' | 'zellij';
+
+// What the watcher and the bot need from a terminal multiplexer. TmuxClient and
+// ZellijClient both implement it; MULTIPLEXER picks one in daemon.ts. A target
+// is always the session name (`claude:<project>`). The session field that stores
+// it is still called `tmuxTarget` because renaming it would mean migrating every
+// state.json already on disk.
+export interface Multiplexer {
+  listSessions(): Promise<string[]>;
+  serverRunning(): Promise<boolean>;
+  processTree(): Promise<ProcessTree | undefined>;
+  capturePane(target: string): Promise<string>;
+  paneCwd(target: string): Promise<string>;
+  // Name of the command running in the pane. undefined means the session has no
+  // pane running anything at all (zellij keeps a session alive after its last
+  // terminal pane closes), which the watcher treats like a pane back at the
+  // shell. A pane that can't be read throws instead.
+  paneCommand(target: string): Promise<string | undefined>;
+  claudeCwd(target: string, tree?: ProcessTree): Promise<string | undefined>;
+  claudeModel(target: string, tree?: ProcessTree): Promise<string | undefined>;
+  claudeEffort(target: string, tree?: ProcessTree): Promise<EffortLevel | undefined>;
+  injectText(target: string, text: string): Promise<void>;
+  sendKeys(target: string, keys: string): Promise<void>;
+  sendKeySeq(target: string, seq: QuestionKey[], opts?: { delayMs?: number }): Promise<void>;
+}
+
+// The process-table helpers below are shared by both clients: they differ only
+// in the pid they start the search from (tmux's pane_pid, zellij's per-session
+// server process).
+
+export async function snapshotProcesses(sh: ShExecFn): Promise<ProcessTree | undefined> {
+  const ps = await sh('ps', ['-o', 'pid=,ppid=,comm=']);
+  if (ps.code !== 0) return undefined;
+  const children = new Map<string, string[]>(); // ppid → [figli]
+  const comms = new Map<string, string>();      // pid → eseguibile
+  for (const line of ps.stdout.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
+    if (!m) continue;
+    const [, pid, ppid, comm] = m;
+    comms.set(pid, comm);
+    const kids = children.get(ppid) ?? [];
+    kids.push(pid);
+    children.set(ppid, kids);
+  }
+  return { children, comms };
+}
+
+// BFS dalla radice: il primo processo con eseguibile `claude` è quello che
+// sta scrivendo il transcript di questa sessione.
+export function findClaudeBelow(root: string, tree: ProcessTree): string | undefined {
+  const { children, comms } = tree;
+  const queue = [root];
+  const seen = new Set<string>();
+  while (queue.length) {
+    const pid = queue.shift()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    const comm = comms.get(pid) ?? '';
+    if (comm.split('/').pop() === 'claude') return pid;
+    queue.push(...(children.get(pid) ?? []));
+  }
+  return undefined;
+}
+
+// Cwd of a process via lsof; undefined when lsof can't read it.
+export async function processCwd(sh: ShExecFn, pid: string): Promise<string | undefined> {
+  const lsof = await sh('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn']);
+  if (lsof.code !== 0) return undefined;
+  for (const line of lsof.stdout.split('\n')) {
+    const n = line.match(/^n(.*)$/);
+    if (n) return n[1];
+  }
+  return undefined;
+}
+
+// Value of `<flag> <value>` on a process's command line; undefined when ps
+// fails or the flag is absent.
+export async function processFlag(sh: ShExecFn, pid: string, flag: string): Promise<string | undefined> {
+  const ps = await sh('ps', ['-o', 'args=', '-p', pid]);
+  if (ps.code !== 0) return undefined;
+  const m = ps.stdout.match(new RegExp(`(?:^|\\s)${flag}\\s+(\\S+)`));
+  return m ? m[1] : undefined;
+}
+
+export function asEffort(raw: string | undefined): EffortLevel | undefined {
+  return raw && (EFFORT_LEVELS as readonly string[]).includes(raw) ? raw as EffortLevel : undefined;
+}
+
+export class TmuxClient implements Multiplexer {
   constructor(
     private exec: ExecFn = createExec(),
     private sh: ShExecFn = createShExec(),
   ) {}
 
   async processTree(): Promise<ProcessTree | undefined> {
-    const ps = await this.sh('ps', ['-o', 'pid=,ppid=,comm=']);
-    if (ps.code !== 0) return undefined;
-    const children = new Map<string, string[]>(); // ppid → [figli]
-    const comms = new Map<string, string>();      // pid → eseguibile
-    for (const line of ps.stdout.split('\n')) {
-      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
-      if (!m) continue;
-      const [, pid, ppid, comm] = m;
-      comms.set(pid, comm);
-      const kids = children.get(ppid) ?? [];
-      kids.push(pid);
-      children.set(ppid, kids);
-    }
-    return { children, comms };
+    return snapshotProcesses(this.sh);
   }
 
   async listSessions(): Promise<string[]> {
@@ -149,21 +224,7 @@ export class TmuxClient {
 
       const snapshot = tree ?? await this.processTree();
       if (!snapshot) return undefined;
-      const { children, comms } = snapshot;
-
-      // BFS dalla radice: il primo processo con eseguibile `claude` è quello che
-      // sta scrivendo il transcript di questa sessione.
-      const queue = [root];
-      const seen = new Set<string>();
-      while (queue.length) {
-        const pid = queue.shift()!;
-        if (seen.has(pid)) continue;
-        seen.add(pid);
-        const comm = comms.get(pid) ?? '';
-        if (comm.split('/').pop() === 'claude') return pid;
-        queue.push(...(children.get(pid) ?? []));
-      }
-      return undefined;
+      return findClaudeBelow(root, snapshot);
     } catch {
       return undefined;
     }
@@ -180,14 +241,7 @@ export class TmuxClient {
   async claudeCwd(target: string, tree?: ProcessTree): Promise<string | undefined> {
     try {
       const pid = await this.findClaudePid(target, tree);
-      if (!pid) return undefined;
-      const lsof = await this.sh('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn']);
-      if (lsof.code !== 0) return undefined;
-      for (const line of lsof.stdout.split('\n')) {
-        const n = line.match(/^n(.*)$/);
-        if (n) return n[1];
-      }
-      return undefined;
+      return pid ? await processCwd(this.sh, pid) : undefined;
     } catch {
       return undefined;
     }
@@ -200,11 +254,7 @@ export class TmuxClient {
   async claudeModel(target: string, tree?: ProcessTree): Promise<string | undefined> {
     try {
       const pid = await this.findClaudePid(target, tree);
-      if (!pid) return undefined;
-      const ps = await this.sh('ps', ['-o', 'args=', '-p', pid]);
-      if (ps.code !== 0) return undefined;
-      const m = ps.stdout.match(/(?:^|\s)--model\s+(\S+)/);
-      return m ? m[1] : undefined;
+      return pid ? await processFlag(this.sh, pid, '--model') : undefined;
     } catch {
       return undefined;
     }
@@ -217,12 +267,7 @@ export class TmuxClient {
   async claudeEffort(target: string, tree?: ProcessTree): Promise<EffortLevel | undefined> {
     try {
       const pid = await this.findClaudePid(target, tree);
-      if (!pid) return undefined;
-      const ps = await this.sh('ps', ['-o', 'args=', '-p', pid]);
-      if (ps.code !== 0) return undefined;
-      const m = ps.stdout.match(/(?:^|\s)--reasoning-effort\s+(\S+)/);
-      const raw = m ? m[1] : undefined;
-      return raw && (EFFORT_LEVELS as readonly string[]).includes(raw) ? raw as EffortLevel : undefined;
+      return pid ? asEffort(await processFlag(this.sh, pid, '--reasoning-effort')) : undefined;
     } catch {
       return undefined;
     }
